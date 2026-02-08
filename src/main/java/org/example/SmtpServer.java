@@ -131,6 +131,7 @@ class SmtpSession extends Thread {
         // puis d'une adresse email entre chevrons et rien d'autre.
         if (!arg.toUpperCase().matches("^FROM:\\s*<[^>]+>$")) {
             out.println("501 Syntax error in parameters or arguments");
+            out.println(arg.toUpperCase());
             return;
         }
         // Extraire l'adresse email en retirant "FROM:" et les chevrons.
