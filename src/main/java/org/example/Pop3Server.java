@@ -4,7 +4,7 @@ import java.net.*;
 import java.util.*;
 
 public class Pop3Server {
-    private static final int PORT = 110; // Custom port to avoid conflicts
+    private static final int PORT = 1110; // Custom port to avoid conflicts
     private List<File> emails;
     private List<Boolean> deletionFlags = new ArrayList<>();
 
