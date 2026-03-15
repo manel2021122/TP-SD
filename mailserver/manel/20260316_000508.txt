@@ -1,0 +1,11 @@
+From: nada@eoa.com
+To: manel@gmail.com
+Date: Mon, 16 Mar 2026 00:05:08 +0100
+Subject: Test Email
+
+helo
+ca marche
+le smpt
+smtp
+tres bien
+bye

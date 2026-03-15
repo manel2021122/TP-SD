@@ -11,10 +11,17 @@ import java.util.concurrent.ConcurrentHashMap;
 public class ImapServerMultiplexed {
     private static final int PORT = 1143;
     private Selector selector;
+    private ImapServerGUI gui;
+    private ServerSocketChannel serverChannel;
+    private volatile boolean active = true; // Variable pour contrôler l'arrêt du serveur
     private Map<SocketChannel, ImapSessionMultiplexed> sessions = new ConcurrentHashMap<>();
     
+    public ImapServerMultiplexed(ImapServerGUI gui) { // Constructeur modifié
+        this.gui = gui;
+    }
+    
     public static void main(String[] args) {
-        new ImapServerMultiplexed().start();
+        new ImapServerMultiplexed(new ImapServerGUI()).start();
     }
     
     public void start() {
@@ -23,16 +30,16 @@ public class ImapServerMultiplexed {
             selector = Selector.open();
             
             // Créer le channel serveur
-            ServerSocketChannel serverChannel = ServerSocketChannel.open();
+            serverChannel = ServerSocketChannel.open();
             serverChannel.configureBlocking(false);
             serverChannel.socket().bind(new InetSocketAddress(PORT));
             serverChannel.register(selector, SelectionKey.OP_ACCEPT);
             
-            System.out.println("Serveur IMAP multiplexé démarré sur le port " + PORT);
+            gui.appendLog("Serveur IMAP démarré sur le port " + PORT); // Log GUI
             
-            while (true) {
+            while (active) {
                 // Attendre qu'un événement se produise (bloquant)
-                selector.select();
+               if( selector.select() == 0 ) continue;
                 
                 // Récupérer les clés des canaux prêts
                 Iterator<SelectionKey> keyIterator = selector.selectedKeys().iterator();
@@ -69,6 +76,17 @@ public class ImapServerMultiplexed {
         }
     }
     
+    public void stop() {
+    try {
+        active = false; // La variable que nous avions déjà mise
+        if (selector != null) {
+            selector.wakeup(); // Réveille le selector pour qu'il voit active = false
+            selector.close();
+        }
+        if (serverChannel != null) serverChannel.close();
+    } catch (IOException e) {  }
+}
+
     private void acceptConnection(SelectionKey key) throws IOException {
         ServerSocketChannel serverChannel = (ServerSocketChannel) key.channel();
         SocketChannel clientChannel = serverChannel.accept();
@@ -78,12 +96,12 @@ public class ImapServerMultiplexed {
         clientChannel.register(selector, SelectionKey.OP_READ);
         
         // Créer une session pour ce client
-        ImapSessionMultiplexed session = new ImapSessionMultiplexed(clientChannel, selector);
+        ImapSessionMultiplexed session = new ImapSessionMultiplexed(clientChannel, selector, gui);
         sessions.put(clientChannel, session);
         
         // Envoyer le message de bienvenue
         session.sendGreeting();
-        
+        gui.appendLog("Nouveau client: " + clientChannel.getRemoteAddress()); // Log GUI
         System.out.println("Nouvelle connexion acceptée de " + clientChannel.getRemoteAddress());
     }
     
@@ -243,12 +261,15 @@ class Mailbox {
     }
 }
 
+
+
 class ImapSessionMultiplexed {
     private SocketChannel clientChannel;
     private Selector selector;
     private ByteBuffer readBuffer = ByteBuffer.allocate(8192);
     private StringBuilder commandBuffer = new StringBuilder();
-    
+    private ImapServerGUI gui;
+
     private ImapState state;
     private String currentUser;
     private File userDir;
@@ -258,9 +279,10 @@ class ImapSessionMultiplexed {
     private static final String CAPABILITIES = "IMAP4rev1";
     private static final String GREETING = "* OK [CAPABILITY " + CAPABILITIES + "] IMAP4rev1 Server Ready";
     
-    public ImapSessionMultiplexed(SocketChannel channel, Selector selector) {
+    public ImapSessionMultiplexed(SocketChannel channel, Selector selector, ImapServerGUI gui) {
         this.clientChannel = channel;
         this.selector = selector;
+        this.gui = gui; // Initialisé
         this.state = ImapState.NOT_AUTHENTICATED;
     }
     
@@ -271,36 +293,41 @@ class ImapSessionMultiplexed {
     public void read() throws IOException {
         readBuffer.clear();
         int bytesRead = clientChannel.read(readBuffer);
-        
+
         if (bytesRead == -1) {
-            // Connexion fermée par le client
-            System.out.println("Client déconnecté: " + clientChannel.getRemoteAddress());
-            clientChannel.close();
+            closeSession();
             return;
         }
-        
+
         readBuffer.flip();
-        byte[] data = new byte[readBuffer.remaining()];
+        byte[] data = new byte[readBuffer.limit()];
         readBuffer.get(data);
+
         String received = new String(data);
-        
         commandBuffer.append(received);
-        
-        // Traiter les commandes complètes (terminées par CRLF)
-        String commands = commandBuffer.toString();
-        int endIndex;
-        while ((endIndex = commands.indexOf("\r\n")) != -1) {
-            String line = commands.substring(0, endIndex);
-            commandBuffer = new StringBuilder(commands.substring(endIndex + 2));
-            commands = commandBuffer.toString();
-            
-            System.out.println("C: " + line);
-            processCommand(line.trim());
+
+        // On traite tant qu'il y a des lignes complètes dans le buffer
+        while (commandBuffer.toString().contains("\r\n")) {
+            int eol = commandBuffer.indexOf("\r\n");
+            String line = commandBuffer.substring(0, eol);
+            commandBuffer.delete(0, eol + 2); // Retire la ligne traitée
+
+            line = cleanInput(line); // CORRECTION : Intégration du nettoyage
+            if (!line.isEmpty()) {
+                gui.appendLog("Client -> " + line);
+                processCommand(line);
+            }
         }
     }
     
+    private void closeSession() throws IOException {
+        gui.appendLog("Session fermée pour un client.");
+        clientChannel.close();
+    }
     private void sendLine(String line) throws IOException {
         System.out.println("S: " + line);
+        gui.appendLog("Serveur -> " + line); // Affichage GUI
+
         ByteBuffer buffer = ByteBuffer.wrap((line + "\r\n").getBytes());
         clientChannel.write(buffer);
     }
@@ -353,6 +380,17 @@ class ImapSessionMultiplexed {
             }
         }
     }
+    private String cleanInput(String input) {
+        StringBuilder sb = new StringBuilder();
+        for (char c : input.toCharArray()) {
+            if (c == '\b' || (int)c == 127) { // Si c'est un Backspace
+                if (sb.length() > 0) sb.deleteCharAt(sb.length() - 1);
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString().trim();
+    }
     
     private void handleCapability() throws IOException {
         sendLine("* CAPABILITY " + CAPABILITIES);
@@ -400,7 +438,8 @@ class ImapSessionMultiplexed {
             return;
         }
         
-        File inboxDir = new File(userDir, "INBOX");
+        //File inboxDir = new File(userDir, "INBOX");
+        File inboxDir = userDir;
         if (!inboxDir.exists()) {
             inboxDir.mkdirs();
         }
@@ -432,7 +471,7 @@ class ImapSessionMultiplexed {
         }
         
         String sequence = parts[0];
-        String dataItems = parts[1];
+        String dataItems = parts[1].toUpperCase();
         
         try {
             int seqNum = Integer.parseInt(sequence);

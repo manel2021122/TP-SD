@@ -5,10 +5,17 @@ import java.util.*;
 
 public class Pop3Server {
     private static final int PORT = 1110; // Custom port to avoid conflicts
-    private List<File> emails;
-    private List<Boolean> deletionFlags = new ArrayList<>();
+    private Pop3ServerGUI gui;
+    private ServerSocket serverSocket;
+    private volatile boolean keepRunning = true;
+    //private List<File> emails;
+    //private List<Boolean> deletionFlags = new ArrayList<>();
 
-    public static void main(String[] args) {
+    public Pop3Server(Pop3ServerGUI gui) {
+        this.gui = gui;
+    }
+
+   /* public static void main(String[] args) {
         try (ServerSocket serverSocket = new ServerSocket(PORT)) {
             System.out.println("POP3 Server started on port " + PORT);
             while (true) {
@@ -19,6 +26,41 @@ public class Pop3Server {
         } catch (IOException e) {
             e.printStackTrace();
         }
+    }*/
+    public void start() {
+        keepRunning = true;
+        try {
+            serverSocket = new ServerSocket(PORT);
+            gui.appendLog("Serveur SMTP prêt sur le port " + PORT);
+            
+            while (keepRunning) {
+                try {
+                    Socket clientSocket = serverSocket.accept();
+                    gui.appendLog("Connexion entrante : " + clientSocket.getInetAddress());
+                    new Pop3Session(clientSocket, gui).start();
+                } catch (IOException e) {
+                    if (keepRunning) {
+                        gui.appendLog("Erreur acceptation : " + e.getMessage());
+                    }
+                }
+            }
+        } catch (IOException e) {
+            gui.appendLog("Erreur critique : " + e.getMessage());
+        } finally {
+            stop(); // Assure la fermeture si on sort de la boucle
+        }
+    }
+
+    public void stop() {
+        keepRunning = false;
+        try {
+            if (serverSocket != null && !serverSocket.isClosed()) {
+                serverSocket.close(); // Libère le port 2525 immédiatement
+                gui.appendLog("Système -> Serveur SMTP arrêté.");
+            }
+        } catch (IOException e) { 
+            gui.appendLog("Erreur lors de la fermeture : " + e.getMessage()); 
+        }
     }
 
 
@@ -28,6 +70,7 @@ class Pop3Session extends Thread {
     private Socket socket;
     private BufferedReader in;
     private PrintWriter out;
+    private Pop3ServerGUI gui;
     private String username;
     private File userDir;
     private List<File> emails;
@@ -35,8 +78,9 @@ class Pop3Session extends Thread {
     private List<Boolean> deletionFlags; // Déclaration correcte
 
 
-    public Pop3Session(Socket socket) {
+   public Pop3Session(Socket socket, Pop3ServerGUI gui) {
         this.socket = socket;
+        this.gui = gui; // Initialisation
         this.authenticated = false;
     }
 
@@ -45,11 +89,13 @@ class Pop3Session extends Thread {
         try {
             in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             out = new PrintWriter(socket.getOutputStream(), true);
-
-            out.println("+OK POP3 server ready");
+            
+            sendResponse("+OK POP3 server ready");
+            
 
             String line;
             while ((line = in.readLine()) != null) {
+                line = cleanInput(line); // Nettoyage de l'entrée pour gérer les backspaces
                 System.out.println("Received: " + line);
                 String[] parts = line.split(" ", 2);
                 String command = parts[0].toUpperCase();
@@ -81,6 +127,7 @@ class Pop3Session extends Thread {
                         handleQuit();
                         return; // Terminer la session
                     default:
+                        sendResponse("-ERR Unknown command");
                         out.println("-ERR Unknown command");
                         break;
                 }
@@ -88,13 +135,32 @@ class Pop3Session extends Thread {
             }
             // Si la boucle se termine, cela signifie que la connexion a été interrompue sans QUIT.
             if (authenticated) {
+                sendResponse("-ERR Connection closed without QUIT");
                 System.err.println("La connexion a été interrompue sans recevoir QUIT. Les suppressions marquées ne seront pas appliquées.");
             }
         } catch (IOException e) {
-            System.err.println("Erreur lors de la lecture de la connexion : " + e.getMessage());
+            gui.appendLog("Erreur Session: " + e.getMessage());
+            
         } finally {
             try { socket.close(); } catch (IOException e) { /* Ignore */ }
         }
+    }
+
+    private String cleanInput(String input) {
+        StringBuilder sb = new StringBuilder();
+        for (char c : input.toCharArray()) {
+            if (c == '\b' || (int)c == 127) { // Si c'est un Backspace
+                if (sb.length() > 0) sb.deleteCharAt(sb.length() - 1);
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString().trim();
+    }
+
+    private void sendResponse(String msg) {
+        gui.appendLog("Serveur -> " + msg);
+        out.println(msg);
     }
 
     private void handleUser(String arg) {
@@ -102,14 +168,17 @@ class Pop3Session extends Thread {
         if (dir.exists() && dir.isDirectory()) {
             username = arg;
             userDir = dir;
-            out.println("+OK User accepted");
+            sendResponse("+Ok User accepted");
+            
         } else {
-            out.println("-ERR User not found");
+            sendResponse("-ERR User not found");
+            
         }
     }
 
     private void handlePass(String arg) {
         if (username == null) {
+            sendResponse("-ERR USER required first");
             out.println("-ERR USER required first");
             return;
         }
@@ -127,6 +196,7 @@ class Pop3Session extends Thread {
         for (int i = 0; i < emails.size(); i++) {
             deletionFlags.add(false);
         }
+        sendResponse("+OK Password accepted");
         out.println("+OK Password accepted");
     }
 
@@ -134,86 +204,100 @@ class Pop3Session extends Thread {
 
     private void handleStat() {
         if (!authenticated) {
-            out.println("-ERR Authentication required");
+            sendResponse("-ERR Authentication required");
             return;
         }
         long size = emails.stream().mapToLong(File::length).sum();
-        out.println("+OK " + emails.size() + " " + size);
+        sendResponse("+OK " + emails.size() + " " + size);
+        
     }
 
     private void handleList() {
         if (!authenticated) {
-            out.println("-ERR Authentication required");
+            sendResponse("-ERR Authentication required");
+            
             return;
         }
-        out.println("+OK " + emails.size() + " messages");
+        sendResponse("+OK " + emails.size() + " messages");
         for (int i = 0; i < emails.size(); i++) {
-            out.println((i + 1) + " " + emails.get(i).length());
+            sendResponse((i + 1) + " " + emails.get(i).length());
         }
-        out.println(".");
+        sendResponse(".");
     }
 
     private void handleRetr(String arg) {
         if (!authenticated) {
-            out.println("-ERR Authentication required");
+            sendResponse("-ERR Authentication required");
+            
             return;
         }
         try {
             int index = Integer.parseInt(arg) - 1;
             if (index < 0 || index >= emails.size()) {
-                out.println("-ERR No such message");
+                sendResponse("-ERR No such message");
+                
                 return;
             }
             File emailFile = emails.get(index);
-            out.println("+OK " + emailFile.length() + " octets");
+            sendResponse("+OK " + emailFile.length() + " octets");
+            
             BufferedReader reader = new BufferedReader(new FileReader(emailFile));
             String line;
             while ((line = reader.readLine()) != null) {
-                out.println(line);
+                sendResponse(line);
             }
-            out.println(".");
+            sendResponse(".");
             reader.close();
         } catch (Exception e) {
-            out.println("-ERR Invalid message number");
+            sendResponse("-ERR Invalid message number");
+            
         }
     }
 
     private void handleDele(String arg) {
         if (!authenticated) {
-            out.println("-ERR Authentication required");
+            
+            sendResponse("-ERR Authentication required!");
             return;
         }
         try {
             arg = arg.trim();
             int index = Integer.parseInt(arg) - 1; // Les messages sont numérotés à partir de 1
             if (index < 0 || index >= emails.size()) {
-                out.println("-ERR No such message");
+                sendResponse("-ERR No such message");
+                
                 return;
             }
             // Vérifier si le message est déjà marqué pour suppression
             if (deletionFlags.get(index)) {
-                out.println("-ERR Message already marked for deletion");
+                sendResponse("-ERR Message already marked for deletion");
+                
                 return;
             }
             // Marquer le message pour suppression (ne pas le supprimer tout de suite)
             deletionFlags.set(index, true);
-            out.println("+OK Message marked for deletion");
+            sendResponse("+OK Message marked for deletion");
+            
         } catch (NumberFormatException nfe) {
-            out.println("-ERR Invalid message number");
+            sendResponse("-ERR Invalid message number");
+            
         } catch (Exception e) {
-            out.println("-ERR Invalid message number");
+            sendResponse("-ERR Invalid message number");
+            
         }
     }
     private void handleRset() {
         if (!authenticated) {
-            out.println("-ERR Authentication required");
+            sendResponse("-ERR Authentication required");
+            
             return;
         }
         // Remise à zéro de tous les flags de suppression
         for (int i = 0; i < deletionFlags.size(); i++) {
             deletionFlags.set(i, false);
         }
-        out.println("+OK Deletion marks reset");
+        sendResponse("+OK Deletion marks reset");
+        
     }
 
 
@@ -225,16 +309,18 @@ class Pop3Session extends Thread {
             if (deletionFlags.get(i)) {
                 File emailFile = emails.get(i);
                 if (emailFile.delete()) {
-                    System.out.println("Deleted email: " + emailFile.getAbsolutePath());
+                    gui.appendLog("Deleted email: " + emailFile.getAbsolutePath());
                     // Optionnel : vous pouvez retirer l'email de la liste
                     emails.remove(i);
                     deletionFlags.remove(i);
                 } else {
-                    System.err.println("Failed to delete email: " + emailFile.getAbsolutePath());
+                    sendResponse("-ERR Failed to delete email");
+                    gui.appendLog("Failed to delete email: " + emailFile.getAbsolutePath());
                 }
             }
         }
-        out.println("+OK POP3 server signing off");
+        sendResponse("+OK POP3 server signing off");
+        gui.appendLog("POP3 server signing off");
     }
 
 }

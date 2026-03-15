@@ -1,0 +1,7 @@
+From: mnihad @gmail.com
+To: manel@gmail.com
+Date: Mon, 09 Mar 2026 10:16:15 +0100
+Subject: Test Email
+
+hello there
+bye

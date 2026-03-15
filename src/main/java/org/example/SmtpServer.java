@@ -7,8 +7,15 @@ import java.util.*;
 public class SmtpServer {
     // Use a custom port (e.g., 2525) to avoid needing special privileges.
     private static final int PORT = 2525;
+    private SmtpServerGUI gui;
+    private ServerSocket serverSocket;
+    private volatile boolean keepRunning = true;
 
-    public static void main(String[] args) {
+    public SmtpServer(SmtpServerGUI gui) {
+        this.gui = gui;
+    }
+
+    /*public static void main(String[] args) {
         try (ServerSocket serverSocket = new ServerSocket(PORT)) {
             System.out.println("SMTP Server started on port " + PORT);
             // Continuously accept new client connections
@@ -21,6 +28,43 @@ public class SmtpServer {
         } catch (IOException e) {
             e.printStackTrace();
         }
+    }*/
+   public void start() {
+        keepRunning = true;
+        try {
+            // CORRECTION : On initialise la variable de classe sans "ServerSocket" devant
+            // On n'utilise pas le try-with-resources ici car il ferme le socket trop tôt
+            serverSocket = new ServerSocket(PORT);
+            gui.appendLog("Serveur SMTP prêt sur le port " + PORT);
+
+            while (keepRunning) {
+                try {
+                    Socket clientSocket = serverSocket.accept();
+                    gui.appendLog("Connexion entrante : " + clientSocket.getInetAddress());
+                    new SmtpSession(clientSocket, gui).start();
+                } catch (IOException e) {
+                    if (keepRunning) {
+                        gui.appendLog("Erreur acceptation : " + e.getMessage());
+                    }
+                }
+            }
+        } catch (IOException e) {
+            gui.appendLog("Erreur critique : " + e.getMessage());
+        } finally {
+            stop(); // Assure la fermeture si on sort de la boucle
+        }
+    }
+
+    public void stop() {
+        keepRunning = false;
+        try {
+            if (serverSocket != null && !serverSocket.isClosed()) {
+                serverSocket.close(); // Libère le port 2525 immédiatement
+                gui.appendLog("Système -> Serveur SMTP arrêté.");
+            }
+        } catch (IOException e) { 
+            gui.appendLog("Erreur lors de la fermeture : " + e.getMessage()); 
+        }
     }
 }
 
@@ -28,6 +72,7 @@ class SmtpSession extends Thread {
     private Socket socket;
     private BufferedReader in;
     private PrintWriter out;
+    private SmtpServerGUI gui;
 
     // Finite state machine for the SMTP session
     private enum SmtpState {
@@ -43,77 +88,80 @@ class SmtpSession extends Thread {
     private List<String> recipients;
     private StringBuilder dataBuffer;
 
-    public SmtpSession(Socket socket) {
+    public SmtpSession(Socket socket, SmtpServerGUI gui2) {
         this.socket = socket;
+        this.gui = gui2;
         this.state = SmtpState.CONNECTED;
         this.recipients = new ArrayList<>();
         this.dataBuffer = new StringBuilder();
     }
 
+
     @Override
     public void run() {
         try {
-            in  = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             out = new PrintWriter(socket.getOutputStream(), true);
 
-            // Send initial greeting (RFC 5321 specifies a 220 response)
-            out.println("220 smtp.example.com Service Ready");
+            sendResponse("220 smtp.example.com Service Ready");
 
             String line;
             while ((line = in.readLine()) != null) {
-                System.out.println("Received: " + line);
-                // If we are in DATA receiving state, accumulate message lines
+                line = cleanInput(line);
+                if (state != SmtpState.DATA_RECEIVING) {
+                    gui.appendLog("Client -> " + line); // Log commande
+                }
+
                 if (state == SmtpState.DATA_RECEIVING) {
-                    // End of DATA input is signaled by a single dot on a line.
                     if (line.equals(".")) {
-                        // Store the email and reset for next message.
                         storeEmail(dataBuffer.toString());
                         dataBuffer.setLength(0);
-                        // After DATA, we allow additional RCPT TO commands for new messages,
-                        // or can reset to HELO_RECEIVED depending on design.
                         state = SmtpState.HELO_RECEIVED;
-                        out.println("250 OK: Message accepted for delivery");
+                        sendResponse("250 OK: Message accepted for delivery");
                     } else {
                         dataBuffer.append(line).append("\r\n");
                     }
                     continue;
                 }
 
-                // Process commands outside of DATA state.
                 String command = extractToken(line).toUpperCase();
                 String argument = extractArgument(line);
 
                 switch (command) {
-                    case "HELO":
-                    case "EHLO":
-                        handleHelo(argument);
-                        break;
-                    case "MAIL":
-                        handleMailFrom(argument);
-                        break;
-                    case "RCPT":
-                        handleRcptTo(argument);
-                        break;
-                    case "DATA":
-                        handleData();
-                        break;
-                    case "QUIT":
-                        handleQuit();
-                        return; // Terminate session after QUIT.
-                    default:
-                        out.println("500 Command unrecognized");
-                        break;
+                    case "HELO": case "EHLO": handleHelo(argument); break;
+                    case "MAIL": handleMailFrom(argument); break;
+                    case "RCPT": handleRcptTo(argument); break;
+                    case "DATA": handleData(); break;
+                    case "QUIT": handleQuit(); return;
+                    default: sendResponse("500 Command unrecognized"); break;
                 }
             }
-            // Si la boucle se termine alors que nous étions en train de recevoir les données,
-            // cela signifie que la connexion a été interrompue avant la réception du point final.
-            if (state == SmtpState.DATA_RECEIVING) {
-                System.err.println("Connection interrupted during DATA phase. Email incomplete, not stored.");
-            }
         } catch (IOException e) {
-            e.printStackTrace();
+            gui.appendLog("Erreur session : " + e.getMessage());
         } finally {
             try { socket.close(); } catch (IOException e) { /* ignore */ }
+        }
+    }
+
+    // Clean input by trimming and removing control characters.
+    private String cleanInput(String input) {
+        if (input == null) return null;
+        StringBuilder sb = new StringBuilder();
+        for (char c : input.toCharArray()) {
+            // Gère Backspace (8) et Delete (127)
+            if (c == '\b' || (int)c == 127) {
+                if (sb.length() > 0) sb.deleteCharAt(sb.length() - 1);
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString(); // On évite le .trim() global pour préserver les espaces DATA
+    }
+
+    private void sendResponse(String msg) {
+        gui.appendLog("Serveur -> " + msg); // Log réponse
+        if (out != null) {
+            out.println(msg); // Indispensable pour que le client reçoive la réponse !
         }
     }
 
@@ -122,7 +170,7 @@ class SmtpSession extends Thread {
         state = SmtpState.HELO_RECEIVED;
         sender = "";
         recipients.clear();
-        out.println("250 Hello " + arg);
+        sendResponse("250 Hello " + arg); 
     }
 
     private void handleMailFrom(String arg) {
@@ -130,8 +178,7 @@ class SmtpSession extends Thread {
         // L'expression régulière vérifie que la chaîne commence par "FROM:", suivie de zéro ou plusieurs espaces,
         // puis d'une adresse email entre chevrons et rien d'autre.
         if (!arg.toUpperCase().matches("^FROM:\\s*<[^>]+>$")) {
-            out.println("501 Syntax error in parameters or arguments");
-            out.println(arg.toUpperCase());
+            sendResponse("501 Syntax error in parameters or arguments");
             return;
         }
         // Extraire l'adresse email en retirant "FROM:" et les chevrons.
@@ -141,27 +188,27 @@ class SmtpSession extends Thread {
 
         String email = extractEmail(potentialEmail);
         if (email == null) {
-            out.println("501 Syntax error in parameters or arguments");
+            sendResponse("501 Syntax error in parameters or arguments");
             return;
         }
         sender = email;
         state = SmtpState.MAIL_FROM_SET;
-        out.println("250 OK");
+        sendResponse("250 OK");
     }
 
     private void handleRcptTo(String arg) {
         if (state != SmtpState.MAIL_FROM_SET && state != SmtpState.RCPT_TO_SET) {
-            out.println("503 Bad sequence of commands");
+            sendResponse("503 Bad sequence of commands");
             return;
         }
         if (!arg.toUpperCase().startsWith("TO:")) {
-            out.println("501 Syntax error in parameters or arguments");
+            sendResponse("501 Syntax error in parameters or arguments");
             return;
         }
         String potentialEmail = arg.substring(3).trim();
         String email = extractEmail(potentialEmail);
         if (email == null) {
-            out.println("501 Syntax error in parameters or arguments");
+            sendResponse("501 Syntax error in parameters or arguments");
             return;
         }
 
@@ -172,7 +219,7 @@ class SmtpSession extends Thread {
         if (!userDir.exists()) {
             boolean created = userDir.mkdirs();  // Create user directory
             if (!created) {
-                out.println("550 Failed to create user directory");
+                sendResponse("550 Failed to create user directory");
                 return;
             }
         }
@@ -180,20 +227,20 @@ class SmtpSession extends Thread {
 
         recipients.add(email);
         state = SmtpState.RCPT_TO_SET;
-        out.println("250 OK");
+        sendResponse("250 OK");
     }
 
     private void handleData() {
         if (state != SmtpState.RCPT_TO_SET || recipients.isEmpty()) {
-            out.println("503 Bad sequence of commands");
+            sendResponse("503 Bad sequence of commands");
             return;
         }
         state = SmtpState.DATA_RECEIVING;
-        out.println("354 Start mail input; end with <CRLF>.<CRLF>");
+        sendResponse("354 Start mail input; end with <CRLF>.<CRLF>");
     }
 
     private void handleQuit() {
-        out.println("221 smtp.example.com Service closing transmission channel");
+        sendResponse("221 smtp.example.com Service closing transmission channel");
     }
 
     // Helper to extract the first token (command) from the input line.
@@ -251,8 +298,10 @@ class SmtpSession extends Thread {
                 writer.print(data);
 
                 // Log success
+                gui.appendLog("Système -> Email stocké pour " + recipient);
                 System.out.println(" Stored email for " + recipient + " in " + emailFile.getAbsolutePath());
             } catch (IOException e) {
+                gui.appendLog("Erreur stockage -> " + e.getMessage());
                 System.err.println(" Error storing email: " + e.getMessage());
             }
         }
