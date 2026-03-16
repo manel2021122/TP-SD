@@ -10,6 +10,7 @@ public class SmtpServer {
     private SmtpServerGUI gui;
     private ServerSocket serverSocket;
     private volatile boolean keepRunning = true;
+    private List<SmtpSession> activeSessions = new ArrayList<>();
 
     public SmtpServer(SmtpServerGUI gui) {
         this.gui = gui;
@@ -41,7 +42,9 @@ public class SmtpServer {
                 try {
                     Socket clientSocket = serverSocket.accept();
                     gui.appendLog("Connexion entrante : " + clientSocket.getInetAddress());
-                    new SmtpSession(clientSocket, gui).start();
+                    SmtpSession session = new SmtpSession(clientSocket, gui, this); // On passe 'this'
+                    activeSessions.add(session);
+                    session.start();
                 } catch (IOException e) {
                     if (keepRunning) {
                         gui.appendLog("Erreur acceptation : " + e.getMessage());
@@ -59,6 +62,9 @@ public class SmtpServer {
         keepRunning = false;
         try {
             if (serverSocket != null && !serverSocket.isClosed()) {
+                for (SmtpSession session : activeSessions) {
+                session.closeSession();
+                }
                 serverSocket.close(); // Libère le port 2525 immédiatement
                 gui.appendLog("Système -> Serveur SMTP arrêté.");
             }
@@ -73,6 +79,8 @@ class SmtpSession extends Thread {
     private BufferedReader in;
     private PrintWriter out;
     private SmtpServerGUI gui;
+    private String clientId;
+    private SmtpServer server;
 
     // Finite state machine for the SMTP session
     private enum SmtpState {
@@ -87,18 +95,32 @@ class SmtpSession extends Thread {
     private String sender;
     private List<String> recipients;
     private StringBuilder dataBuffer;
+    private int clientNum;
 
-    public SmtpSession(Socket socket, SmtpServerGUI gui2) {
+    public SmtpSession(Socket socket, SmtpServerGUI gui2, SmtpServer server) {
         this.socket = socket;
         this.gui = gui2;
+        this.server = server;
+        this.clientNum = gui.getNextClientNumber(); // Get a unique client number for logging
         this.state = SmtpState.CONNECTED;
         this.recipients = new ArrayList<>();
         this.dataBuffer = new StringBuilder();
     }
 
+    public void closeSession() {
+        try {
+            if (socket != null && !socket.isClosed()) {
+                socket.close(); // C'est CA qui coupera la connexion du client Telnet
+            }
+        } catch (IOException e) { 
+            gui.appendLog("Erreur fermeture session : " + e.getMessage()); 
+        }
+    }
 
     @Override
     public void run() {
+        gui.updateClientCount(true); // +1 connexion
+        gui.appendLog("ÉVÉNEMENT : Client " + clientNum + " - Nouvelle session ouverte pour " + socket.getInetAddress());
         try {
             in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             out = new PrintWriter(socket.getOutputStream(), true);
@@ -109,7 +131,7 @@ class SmtpSession extends Thread {
             while ((line = in.readLine()) != null) {
                 line = cleanInput(line);
                 if (state != SmtpState.DATA_RECEIVING) {
-                    gui.appendLog("Client -> " + line); // Log commande
+                    gui.appendLog("Client " + clientNum + " -> " + line); // Log commande
                 }
 
                 if (state == SmtpState.DATA_RECEIVING) {
@@ -139,6 +161,8 @@ class SmtpSession extends Thread {
         } catch (IOException e) {
             gui.appendLog("Erreur session : " + e.getMessage());
         } finally {
+            gui.updateClientCount(false); // -1 déconnexion
+            gui.appendLog("ÉVÉNEMENT : Session terminée pour " + socket.getInetAddress());
             try { socket.close(); } catch (IOException e) { /* ignore */ }
         }
     }

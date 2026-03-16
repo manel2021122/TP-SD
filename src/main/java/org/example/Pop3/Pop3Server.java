@@ -8,6 +8,7 @@ public class Pop3Server {
     private Pop3ServerGUI gui;
     private ServerSocket serverSocket;
     private volatile boolean keepRunning = true;
+    private List<Pop3Session> activeSessions = new ArrayList<>();
     //private List<File> emails;
     //private List<Boolean> deletionFlags = new ArrayList<>();
 
@@ -36,8 +37,11 @@ public class Pop3Server {
             while (keepRunning) {
                 try {
                     Socket clientSocket = serverSocket.accept();
+                    // On crée la session
+                    Pop3Session session = new Pop3Session(clientSocket, gui, this);
+                    activeSessions.add(session);
+                    session.start();
                     gui.appendLog("Connexion entrante : " + clientSocket.getInetAddress());
-                    new Pop3Session(clientSocket, gui).start();
                 } catch (IOException e) {
                     if (keepRunning) {
                         gui.appendLog("Erreur acceptation : " + e.getMessage());
@@ -54,15 +58,18 @@ public class Pop3Server {
     public void stop() {
         keepRunning = false;
         try {
-            if (serverSocket != null && !serverSocket.isClosed()) {
-                serverSocket.close(); // Libère le port 2525 immédiatement
-                gui.appendLog("Système -> Serveur SMTP arrêté.");
-            }
+            if (serverSocket != null) serverSocket.close();
+            // ON FERME TOUS LES CLIENTS ACTIFS
+            for (Pop3Session s : activeSessions) s.closeSession();
+            activeSessions.clear();
+            gui.appendLog("Système -> Serveur POP3 arrêté et clients déconnectés.");
         } catch (IOException e) { 
             gui.appendLog("Erreur lors de la fermeture : " + e.getMessage()); 
         }
     }
-
+    public void removeSession(Pop3Session session) {
+        activeSessions.remove(session);
+    }
 
 }
 
@@ -76,16 +83,26 @@ class Pop3Session extends Thread {
     private List<File> emails;
     private boolean authenticated;
     private List<Boolean> deletionFlags; // Déclaration correcte
+    private int clientNum;
+    private Pop3Server server;
 
 
-   public Pop3Session(Socket socket, Pop3ServerGUI gui) {
+   public Pop3Session(Socket socket, Pop3ServerGUI gui, Pop3Server server) {
         this.socket = socket;
         this.gui = gui; // Initialisation
+        this.server = server; // Initialisation
+        this.clientNum = gui.getNextClientNumber(); // Récupération du numéro de client
         this.authenticated = false;
+    }
+
+    public void closeSession() {
+        try { socket.close(); } catch (IOException e) { }
     }
 
     @Override
     public void run() {
+        gui.updateClientCount(true);
+        gui.appendLog("ÉVÉNEMENT : Client " + clientNum + " connecté");
         try {
             in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             out = new PrintWriter(socket.getOutputStream(), true);
@@ -142,7 +159,10 @@ class Pop3Session extends Thread {
             gui.appendLog("Erreur Session: " + e.getMessage());
             
         } finally {
-            try { socket.close(); } catch (IOException e) { /* Ignore */ }
+            gui.updateClientCount(false);
+            server.removeSession(this);
+            gui.appendLog("ÉVÉNEMENT : Client " + clientNum + " déconnecté");
+            closeSession();
         }
     }
 
@@ -159,7 +179,7 @@ class Pop3Session extends Thread {
     }
 
     private void sendResponse(String msg) {
-        gui.appendLog("Serveur -> " + msg);
+        gui.appendLog("Serveur (to Client " + clientNum + ") -> " + msg);
         out.println(msg);
     }
 

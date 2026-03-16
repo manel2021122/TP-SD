@@ -7,11 +7,15 @@ public class ImapServerGUI extends JFrame {
     private JTextArea logArea;
     private JButton startBtn, stopBtn;
     private ImapServerMultiplexed server;
+    private java.util.concurrent.atomic.AtomicInteger totalClientsCreated = new java.util.concurrent.atomic.AtomicInteger(0);
+    private java.util.concurrent.atomic.AtomicInteger connectedClients = new java.util.concurrent.atomic.AtomicInteger(0);
+    private JLabel clientCountLabel; // Label pour afficher le nombre de clients connectés
 
     public ImapServerGUI() {
         setTitle("Supervision IMAP");
         setSize(700, 500);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        clientCountLabel = new JLabel("Clients connectés : 0");
         
         logArea = new JTextArea();
         logArea.setEditable(false);
@@ -25,6 +29,7 @@ public class ImapServerGUI extends JFrame {
         JPanel panel = new JPanel();
         panel.add(startBtn);
         panel.add(stopBtn);
+        panel.add(clientCountLabel); 
 
         add(panel, BorderLayout.NORTH);
         add(new JScrollPane(logArea), BorderLayout.CENTER);
@@ -45,8 +50,25 @@ public class ImapServerGUI extends JFrame {
         });
     }
 
+    public int getNextClientNumber() {
+        return totalClientsCreated.incrementAndGet();
+    }
+
+    public void updateClientCount(boolean increment) {
+        // Met à jour ton JLabel si tu en as un (comme pour POP3)
+        int count = increment ? connectedClients.incrementAndGet() : connectedClients.decrementAndGet();
+        if (count < 0) count = connectedClients.getAndSet(0); // Sécurité
+        final int finalCount = count;
+        SwingUtilities.invokeLater(() -> clientCountLabel.setText("Clients connectés : " + finalCount));
+    }
+    
+
     public void appendLog(String msg) {
-        SwingUtilities.invokeLater(() -> logArea.append(msg + "\n"));
+        String timestamp = new java.text.SimpleDateFormat("HH:mm:ss").format(new java.util.Date());
+        SwingUtilities.invokeLater(() -> {
+            logArea.append("[" + timestamp + "] " + msg + "\n");
+            logArea.setCaretPosition(logArea.getDocument().getLength());
+        });
     }
 
     public static void main(String[] args) {

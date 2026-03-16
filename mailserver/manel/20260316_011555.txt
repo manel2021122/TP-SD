@@ -1,0 +1,8 @@
+From: test@gmail.com
+To: manel@gmail.com
+Date: Mon, 16 Mar 2026 01:15:55 +0100
+Subject: Test Email
+
+hi
+test de compteur de client + hordatage
+

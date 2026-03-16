@@ -77,15 +77,36 @@ public class ImapServerMultiplexed {
     }
     
     public void stop() {
-    try {
-        active = false; // La variable que nous avions déjà mise
-        if (selector != null) {
-            selector.wakeup(); // Réveille le selector pour qu'il voit active = false
-            selector.close();
+        active = false;
+        try {
+            if (selector != null) {
+                selector.wakeup();
+
+                // 1. Fermer toutes les sessions clients actives
+                for (ImapSessionMultiplexed session : sessions.values()) {
+                    try {
+                        session.closeSession(); // Ferme le canal et décrémente la GUI
+                    } catch (IOException e) { /* Ignorer */ }
+                }
+                sessions.clear(); // Vide la liste
+
+                selector.close();
+            }
+
+            // 2. Fermer le canal serveur principal
+            if (serverChannel != null) {
+                serverChannel.close();
+            }
+
+            gui.appendLog("SYSTÈME : Serveur totalement arrêté et clients déconnectés.");
+        } catch (IOException e) {
+            gui.appendLog("Erreur lors de l'arrêt : " + e.getMessage());
         }
-        if (serverChannel != null) serverChannel.close();
-    } catch (IOException e) {  }
-}
+    }   
+
+    public void removeSession(SocketChannel channel) {
+        sessions.remove(channel);
+    }
 
     private void acceptConnection(SelectionKey key) throws IOException {
         ServerSocketChannel serverChannel = (ServerSocketChannel) key.channel();
@@ -96,27 +117,28 @@ public class ImapServerMultiplexed {
         clientChannel.register(selector, SelectionKey.OP_READ);
         
         // Créer une session pour ce client
-        ImapSessionMultiplexed session = new ImapSessionMultiplexed(clientChannel, selector, gui);
+        ImapSessionMultiplexed session = new ImapSessionMultiplexed(clientChannel, selector, gui, this);
         sessions.put(clientChannel, session);
         
         // Envoyer le message de bienvenue
+        gui.updateClientCount(true);
+        int num = session.getClientNum(); // Numéro de client unique
+        gui.appendLog("ÉVÉNEMENT : Client " + num + " connecté (" + clientChannel.getRemoteAddress() + ")");
         session.sendGreeting();
-        gui.appendLog("Nouveau client: " + clientChannel.getRemoteAddress()); // Log GUI
-        System.out.println("Nouvelle connexion acceptée de " + clientChannel.getRemoteAddress());
     }
     
     private void readFromClient(SelectionKey key) throws IOException {
         SocketChannel clientChannel = (SocketChannel) key.channel();
         ImapSessionMultiplexed session = sessions.get(clientChannel);
         
-        if (session == null) {
+        try {
+            session.read();
+        } catch (IOException e) {
+            // Si une erreur survient (client qui coupe brutalement)
+            if (session != null) session.closeSession();
+            sessions.remove(clientChannel); // On nettoie la Map ici !
             key.cancel();
-            clientChannel.close();
-            return;
         }
-        
-        // Lire les données du client
-        session.read();
     }
 }
 
@@ -271,21 +293,35 @@ class ImapSessionMultiplexed {
     private ImapServerGUI gui;
 
     private ImapState state;
+    private ImapServerMultiplexed server;
     private String currentUser;
     private File userDir;
     private Mailbox currentMailbox;
     private String currentTag;
+    private int clientNum;
     
     private static final String CAPABILITIES = "IMAP4rev1";
     private static final String GREETING = "* OK [CAPABILITY " + CAPABILITIES + "] IMAP4rev1 Server Ready";
     
-    public ImapSessionMultiplexed(SocketChannel channel, Selector selector, ImapServerGUI gui) {
+    public ImapSessionMultiplexed(SocketChannel channel, Selector selector, ImapServerGUI gui, ImapServerMultiplexed server) {
         this.clientChannel = channel;
         this.selector = selector;
         this.gui = gui; // Initialisé
+        this.server = server;
         this.state = ImapState.NOT_AUTHENTICATED;
+        this.setClientNum(gui.getNextClientNumber()); // Numéro de client unique
     }
     
+    public int getClientNum() {
+        return clientNum;
+        
+    }
+
+    public void setClientNum(int clientNum) {
+        this.clientNum = clientNum;
+        
+    }
+
     public void sendGreeting() throws IOException {
         sendLine(GREETING);
     }
@@ -314,19 +350,24 @@ class ImapSessionMultiplexed {
 
             line = cleanInput(line); // CORRECTION : Intégration du nettoyage
             if (!line.isEmpty()) {
-                gui.appendLog("Client -> " + line);
+                gui.appendLog("Client " + getClientNum() + " -> " + line);
                 processCommand(line);
             }
         }
     }
     
-    private void closeSession() throws IOException {
-        gui.appendLog("Session fermée pour un client.");
+    public void closeSession() throws IOException {
+        if (clientChannel.isOpen()) {
+        gui.updateClientCount(false); // Décrémente le compteur
+        gui.appendLog("ÉVÉNEMENT : Client " + clientNum + " déconnecté.");
+        server.removeSession(clientChannel);
         clientChannel.close();
+       }
     }
+
     private void sendLine(String line) throws IOException {
         System.out.println("S: " + line);
-        gui.appendLog("Serveur -> " + line); // Affichage GUI
+        gui.appendLog("Serveur (to Client " + getClientNum() + ")-> " + line); // Affichage GUI
 
         ByteBuffer buffer = ByteBuffer.wrap((line + "\r\n").getBytes());
         clientChannel.write(buffer);
@@ -391,6 +432,7 @@ class ImapSessionMultiplexed {
         }
         return sb.toString().trim();
     }
+    
     
     private void handleCapability() throws IOException {
         sendLine("* CAPABILITY " + CAPABILITIES);
@@ -578,6 +620,6 @@ class ImapSessionMultiplexed {
         sendLine("* BYE IMAP4rev1 Server logging out");
         sendLine(currentTag + " OK LOGOUT completed");
         state = ImapState.LOGOUT;
-        clientChannel.close();
+        closeSession();
     }
 }
