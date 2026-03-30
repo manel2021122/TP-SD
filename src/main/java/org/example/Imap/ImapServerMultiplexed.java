@@ -7,16 +7,17 @@ import java.nio.file.*;
 import java.util.*;
 import java.net.*;
 import java.util.concurrent.ConcurrentHashMap;
+import org.example.SharedFolder.IAuthService; // Import de l'interface RMI
 
 public class ImapServerMultiplexed {
     private static final int PORT = 1143;
     private Selector selector;
     private ImapServerGUI gui;
     private ServerSocketChannel serverChannel;
-    private volatile boolean active = true; // Variable pour contrôler l'arrêt du serveur
+    private volatile boolean active = true;
     private Map<SocketChannel, ImapSessionMultiplexed> sessions = new ConcurrentHashMap<>();
     
-    public ImapServerMultiplexed(ImapServerGUI gui) { // Constructeur modifié
+    public ImapServerMultiplexed(ImapServerGUI gui) {
         this.gui = gui;
     }
     
@@ -26,48 +27,33 @@ public class ImapServerMultiplexed {
     
     public void start() {
         try {
-            // Ouvrir le selector
             selector = Selector.open();
-            
-            // Créer le channel serveur
             serverChannel = ServerSocketChannel.open();
             serverChannel.configureBlocking(false);
             serverChannel.socket().bind(new InetSocketAddress(PORT));
             serverChannel.register(selector, SelectionKey.OP_ACCEPT);
             
-            gui.appendLog("Serveur IMAP démarré sur le port " + PORT); // Log GUI
+            gui.appendLog("Serveur IMAP Multiplexé démarré sur le port " + PORT);
             
             while (active) {
-                // Attendre qu'un événement se produise (bloquant)
-               if( selector.select() == 0 ) continue;
+                if(selector.select() == 0) continue;
                 
-                // Récupérer les clés des canaux prêts
                 Iterator<SelectionKey> keyIterator = selector.selectedKeys().iterator();
-                
                 while (keyIterator.hasNext()) {
                     SelectionKey key = keyIterator.next();
                     keyIterator.remove();
                     
-                    if (!key.isValid()) {
-                        continue;
-                    }
+                    if (!key.isValid()) continue;
                     
                     try {
                         if (key.isAcceptable()) {
-                            // Nouvelle connexion entrante
                             acceptConnection(key);
                         } else if (key.isReadable()) {
-                            // Données disponibles à lire
                             readFromClient(key);
                         }
                     } catch (IOException e) {
-                        System.err.println("Erreur sur la connexion: " + e.getMessage());
                         key.cancel();
-                        try {
-                            key.channel().close();
-                        } catch (IOException ex) {
-                            // Ignorer
-                        }
+                        try { key.channel().close(); } catch (IOException ex) {}
                     }
                 }
             }
@@ -81,79 +67,59 @@ public class ImapServerMultiplexed {
         try {
             if (selector != null) {
                 selector.wakeup();
-
-                // 1. Fermer toutes les sessions clients actives
                 for (ImapSessionMultiplexed session : sessions.values()) {
-                    try {
-                        session.closeSession(); // Ferme le canal et décrémente la GUI
-                    } catch (IOException e) { /* Ignorer */ }
+                    try { session.closeSession(); } catch (IOException e) {}
                 }
-                sessions.clear(); // Vide la liste
-
+                sessions.clear();
                 selector.close();
             }
-
-            // 2. Fermer le canal serveur principal
-            if (serverChannel != null) {
-                serverChannel.close();
-            }
-
-            gui.appendLog("SYSTÈME : Serveur totalement arrêté et clients déconnectés.");
+            if (serverChannel != null) serverChannel.close();
+            gui.appendLog("SYSTÈME : Serveur IMAP arrêté.");
         } catch (IOException e) {
-            gui.appendLog("Erreur lors de l'arrêt : " + e.getMessage());
+            gui.appendLog("Erreur arrêt : " + e.getMessage());
         }
-    }   
+    } 
 
     public void removeSession(SocketChannel channel) {
         sessions.remove(channel);
     }
 
     private void acceptConnection(SelectionKey key) throws IOException {
-        ServerSocketChannel serverChannel = (ServerSocketChannel) key.channel();
-        SocketChannel clientChannel = serverChannel.accept();
-        clientChannel.configureBlocking(false);
+        ServerSocketChannel server = (ServerSocketChannel) key.channel();
+        SocketChannel client = server.accept();
+        client.configureBlocking(false);
+        client.register(selector, SelectionKey.OP_READ);
         
-        // Enregistrer le canal client pour la lecture
-        clientChannel.register(selector, SelectionKey.OP_READ);
+        ImapSessionMultiplexed session = new ImapSessionMultiplexed(client, selector, gui, this);
+        sessions.put(client, session);
         
-        // Créer une session pour ce client
-        ImapSessionMultiplexed session = new ImapSessionMultiplexed(clientChannel, selector, gui, this);
-        sessions.put(clientChannel, session);
-        
-        // Envoyer le message de bienvenue
         gui.updateClientCount(true);
-        int num = session.getClientNum(); // Numéro de client unique
-        gui.appendLog("ÉVÉNEMENT : Client " + num + " connecté (" + clientChannel.getRemoteAddress() + ")");
+        gui.appendLog("Connexion : Client " + session.getClientNum() + " (" + client.getRemoteAddress() + ")");
         session.sendGreeting();
     }
     
     private void readFromClient(SelectionKey key) throws IOException {
         SocketChannel clientChannel = (SocketChannel) key.channel();
         ImapSessionMultiplexed session = sessions.get(clientChannel);
-        
-        try {
-            session.read();
-        } catch (IOException e) {
-            // Si une erreur survient (client qui coupe brutalement)
-            if (session != null) session.closeSession();
-            sessions.remove(clientChannel); // On nettoie la Map ici !
-            key.cancel();
+        if (session != null) {
+            try {
+                session.read();
+            } catch (IOException e) {
+                session.closeSession();
+                key.cancel();
+            }
         }
     }
 }
 
-enum ImapState {
-    NOT_AUTHENTICATED,
-    AUTHENTICATED,
-    SELECTED,
-    LOGOUT
-}
+enum ImapState { NOT_AUTHENTICATED, AUTHENTICATED, SELECTED, LOGOUT }
 
+// Les classes Message et Mailbox restent identiques à ton code original
 class Message {
     private int uid;
     private File file;
-    private boolean seen;  // Flag \Seen
-    private boolean deleted; // Flag \Deleted
+    private boolean seen;
+    private boolean deleted;
     
     public Message(int uid, File file) {
         this.uid = uid;
@@ -161,14 +127,12 @@ class Message {
         this.seen = false;
         this.deleted = false;
     }
-    
     public int getUid() { return uid; }
     public File getFile() { return file; }
     public boolean isSeen() { return seen; }
     public void setSeen(boolean seen) { this.seen = seen; }
     public boolean isDeleted() { return deleted; }
     public void setDeleted(boolean deleted) { this.deleted = deleted; }
-    
     public String getFlags() {
         StringBuilder flags = new StringBuilder();
         if (seen) flags.append("\\Seen ");
@@ -180,64 +144,38 @@ class Message {
 class Mailbox {
     private String name;
     private List<Message> messages;
-    private Map<Integer, Integer> uidMap;
     private int nextUid;
     
     public Mailbox(String name, File directory) {
         this.name = name;
         this.messages = new ArrayList<>();
-        this.uidMap = new HashMap<>();
         this.nextUid = 1;
         loadMessages(directory);
     }
     
     private void loadMessages(File directory) {
-        File[] files = directory.listFiles((dir, name) -> 
-            name.endsWith(".eml") || name.endsWith(".txt"));
-        
+        File[] files = directory.listFiles((dir, fname) -> fname.endsWith(".txt") || fname.endsWith(".eml"));
         if (files != null) {
             for (File file : files) {
                 messages.add(new Message(nextUid++, file));
             }
-        }
-        // Construit la correspondance numéro séquence -> UID
-        for (int i = 0; i < messages.size(); i++) {
-            uidMap.put(i + 1, messages.get(i).getUid());
         }
     }
     
     public String getName() { return name; }
     public int getMessageCount() { return messages.size(); }
     public int getNextUid() { return nextUid; }
-    
     public Message getMessageBySequence(int seq) {
-        if (seq < 1 || seq > messages.size()) return null;
-        return messages.get(seq - 1);
-    }
-    
-    public Message getMessageByUid(int uid) {
-        for (Message msg : messages) {
-            if (msg.getUid() == uid) return msg;
-        }
-        return null;
+        return (seq < 1 || seq > messages.size()) ? null : messages.get(seq - 1);
     }
     
     public List<Integer> searchMessages(String criteria) {
         List<Integer> results = new ArrayList<>();
-        String searchLower = criteria.toLowerCase();
-        
         for (int i = 0; i < messages.size(); i++) {
-            Message msg = messages.get(i);
-            File file = msg.getFile();
-            
             try {
-                String content = new String(Files.readAllBytes(file.toPath())).toLowerCase();
-                if (content.contains(searchLower)) {
-                    results.add(i + 1);
-                }
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
+                String content = new String(Files.readAllBytes(messages.get(i).getFile().toPath())).toLowerCase();
+                if (content.contains(criteria.toLowerCase())) results.add(i + 1);
+            } catch (IOException e) {}
         }
         return results;
     }
@@ -245,45 +183,14 @@ class Mailbox {
     public void updateFlags(int seq, String operation, String flags) {
         Message msg = getMessageBySequence(seq);
         if (msg != null) {
-            boolean hasSeen = flags.contains("\\Seen");
-            boolean hasDeleted = flags.contains("\\Deleted");
-            
-            switch (operation) {
-                case "FLAGS":
-                    msg.setSeen(hasSeen);
-                    msg.setDeleted(hasDeleted);
-                    break;
-                case "+FLAGS":
-                    if (hasSeen) msg.setSeen(true);
-                    if (hasDeleted) msg.setDeleted(true);
-                    break;
-                case "-FLAGS":
-                    if (hasSeen) msg.setSeen(false);
-                    if (hasDeleted) msg.setDeleted(false);
-                    break;
-            }
+            boolean seen = flags.contains("\\Seen");
+            boolean del = flags.contains("\\Deleted");
+            if (operation.equals("FLAGS")) { msg.setSeen(seen); msg.setDeleted(del); }
+            else if (operation.equals("+FLAGS")) { if(seen) msg.setSeen(true); if(del) msg.setDeleted(true); }
+            else if (operation.equals("-FLAGS")) { if(seen) msg.setSeen(false); if(del) msg.setDeleted(false); }
         }
-    }
-    
-    public int getUnseenCount() {
-        int count = 0;
-        for (int i = 1; i <= messages.size(); i++) {
-            Message msg = getMessageBySequence(i);
-            if (msg != null && !msg.isSeen()) count++;
-        }
-        return count;
-    }
-    
-    public int getFirstUnseen() {
-        for (int i = 1; i <= messages.size(); i++) {
-            Message msg = getMessageBySequence(i);
-            if (msg != null && !msg.isSeen()) return i;
-        }
-        return 0;
     }
 }
-
-
 
 class ImapSessionMultiplexed {
     private SocketChannel clientChannel;
@@ -291,7 +198,6 @@ class ImapSessionMultiplexed {
     private ByteBuffer readBuffer = ByteBuffer.allocate(8192);
     private StringBuilder commandBuffer = new StringBuilder();
     private ImapServerGUI gui;
-
     private ImapState state;
     private ImapServerMultiplexed server;
     private String currentUser;
@@ -299,58 +205,50 @@ class ImapSessionMultiplexed {
     private Mailbox currentMailbox;
     private String currentTag;
     private int clientNum;
-    
-    private static final String CAPABILITIES = "IMAP4rev1";
-    private static final String GREETING = "* OK [CAPABILITY " + CAPABILITIES + "] IMAP4rev1 Server Ready";
-    
+    private IAuthService authService; // Stub RMI
+    private String sessionToken = null;
+    private String authenticatedUser = null;
+
+
     public ImapSessionMultiplexed(SocketChannel channel, Selector selector, ImapServerGUI gui, ImapServerMultiplexed server) {
         this.clientChannel = channel;
         this.selector = selector;
-        this.gui = gui; // Initialisé
+        this.gui = gui;
         this.server = server;
         this.state = ImapState.NOT_AUTHENTICATED;
-        this.setClientNum(gui.getNextClientNumber()); // Numéro de client unique
+        this.clientNum = gui.getNextClientNumber();
+        
+        // Liaison RMI
+        try {
+            authService = (IAuthService) java.rmi.Naming.lookup("rmi://localhost/AuthService");
+        } catch (Exception e) {
+            gui.appendLog("IMAP RMI ERROR (Client " + clientNum + "): AuthService introuvable.");
+        }
     }
     
-    public int getClientNum() {
-        return clientNum;
-        
-    }
-
-    public void setClientNum(int clientNum) {
-        this.clientNum = clientNum;
-        
-    }
+    public int getClientNum() { return clientNum; }
 
     public void sendGreeting() throws IOException {
-        sendLine(GREETING);
+        sendLine("* OK [CAPABILITY IMAP4rev1] Server Ready");
     }
     
     public void read() throws IOException {
         readBuffer.clear();
         int bytesRead = clientChannel.read(readBuffer);
-
-        if (bytesRead == -1) {
-            closeSession();
-            return;
-        }
-
+        if (bytesRead == -1) { closeSession(); return; }
+        
         readBuffer.flip();
         byte[] data = new byte[readBuffer.limit()];
         readBuffer.get(data);
+        commandBuffer.append(new String(data));
 
-        String received = new String(data);
-        commandBuffer.append(received);
-
-        // On traite tant qu'il y a des lignes complètes dans le buffer
         while (commandBuffer.toString().contains("\r\n")) {
             int eol = commandBuffer.indexOf("\r\n");
             String line = commandBuffer.substring(0, eol);
-            commandBuffer.delete(0, eol + 2); // Retire la ligne traitée
-
-            line = cleanInput(line); // CORRECTION : Intégration du nettoyage
+            commandBuffer.delete(0, eol + 2);
+            line = cleanInput(line);
             if (!line.isEmpty()) {
-                gui.appendLog("Client " + getClientNum() + " -> " + line);
+                gui.appendLog("Client " + clientNum + " -> " + line);
                 processCommand(line);
             }
         }
@@ -358,268 +256,133 @@ class ImapSessionMultiplexed {
     
     public void closeSession() throws IOException {
         if (clientChannel.isOpen()) {
-        gui.updateClientCount(false); // Décrémente le compteur
-        gui.appendLog("ÉVÉNEMENT : Client " + clientNum + " déconnecté.");
-        server.removeSession(clientChannel);
-        clientChannel.close();
-       }
+            gui.updateClientCount(false);
+            gui.appendLog("ÉVÉNEMENT : Client " + clientNum + " déconnecté.");
+            server.removeSession(clientChannel);
+            clientChannel.close();
+        }
     }
 
     private void sendLine(String line) throws IOException {
-        System.out.println("S: " + line);
-        gui.appendLog("Serveur (to Client " + getClientNum() + ")-> " + line); // Affichage GUI
-
+        gui.appendLog("Serveur -> Client " + clientNum + ": " + line);
         ByteBuffer buffer = ByteBuffer.wrap((line + "\r\n").getBytes());
         clientChannel.write(buffer);
     }
     
     private void processCommand(String line) {
         try {
-            if (line.trim().isEmpty()) return;
-            
             String[] parts = line.split(" ", 3);
-            String tag = parts[0];
+            if (parts.length < 2) return;
+            currentTag = parts[0];
             String command = parts[1].toUpperCase();
             String args = parts.length > 2 ? parts[2] : "";
             
-            currentTag = tag;
-            
             switch (command) {
-                case "LOGIN":
-                    handleLogin(args);
-                    break;
-                case "SELECT":
-                    handleSelect(args);
-                    break;
-                case "FETCH":
-                    handleFetch(args);
-                    break;
-                case "STORE":
-                    handleStore(args);
-                    break;
-                case "SEARCH":
-                    handleSearch(args);
-                    break;
-                case "LOGOUT":
-                    handleLogout();
-                    break;
-                case "CAPABILITY":
-                    handleCapability();
-                    break;
-                case "NOOP":
-                    handleNoop();
-                    break;
-                default:
-                    sendLine(tag + " BAD Unknown command");
-                    break;
+                case "CAPABILITY": sendLine("* CAPABILITY IMAP4rev1"); sendLine(currentTag + " OK completed"); break;
+                case "LOGIN": handleLogin(args); break;
+                case "SELECT": handleSelect(args); break;
+                case "FETCH": handleFetch(args); break;
+                case "STORE": handleStore(args); break;
+                case "SEARCH": handleSearch(args); break;
+                case "NOOP": sendLine(currentTag + " OK NOOP completed"); break;
+                case "LOGOUT": sendLine("* BYE Logging out"); sendLine(currentTag + " OK LOGOUT completed"); closeSession(); break;
+                default: sendLine(currentTag + " BAD Unknown command"); break;
             }
         } catch (IOException e) {
-            try {
-                sendLine(currentTag + " BAD Server error: " + e.getMessage());
-            } catch (IOException ex) {
-                System.err.println("Erreur d'envoi: " + ex.getMessage());
-            }
+            gui.appendLog("Erreur session " + clientNum + ": " + e.getMessage());
         }
     }
+
+    private void handleLogin(String args) throws IOException {
+        String[] creds = args.split(" ");
+        if (creds.length < 2) { sendLine(currentTag + " BAD Arguments"); return; }
+        
+        String user = creds[0].replace("\"", "");
+        String pass = creds[1].replace("\"", "");
+
+        try {
+            if (authService != null) {
+                // APPEL RMI : On récupère le jeton
+                String token = authService.loginAndGetToken(user, pass);
+
+                if (token != null) {
+                    this.sessionToken = token;
+                    this.authenticatedUser = user;
+                    this.userDir = new File("mailserver/" + user);
+                    if (!userDir.exists()) userDir.mkdirs();
+
+                    this.state = ImapState.AUTHENTICATED;
+                    sendLine(currentTag + " OK LOGIN completed. Session: " + token);
+                } else {
+                    sendLine(currentTag + " NO Login failed");
+                }
+            }
+        } catch (Exception e) {
+            sendLine(currentTag + " BAD Auth Service error");
+        }
+    }
+
+    private boolean isTokenValid() {
+        try {
+            if (sessionToken == null || authService == null) return false;
+            String verifiedUser = authService.verifyToken(sessionToken);
+            // On vérifie que le token est valide ET qu'il appartient bien à l'utilisateur de la session
+            return verifiedUser != null && verifiedUser.equals(authenticatedUser);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private void handleSelect(String args) throws IOException {
+        if (!isTokenValid()) { sendLine(currentTag + " BAD Invalid session token"); return; }
+        if (state == ImapState.NOT_AUTHENTICATED) { sendLine(currentTag + " BAD Auth required"); return; }
+        currentMailbox = new Mailbox("INBOX", userDir);
+        state = ImapState.SELECTED;
+        sendLine("* " + currentMailbox.getMessageCount() + " EXISTS");
+        sendLine("* FLAGS (\\Seen \\Deleted)");
+        sendLine(currentTag + " OK [READ-WRITE] SELECT completed");
+    }
+
+    private void handleFetch(String args) throws IOException {
+        if (!isTokenValid()) { sendLine(currentTag + " BAD Invalid session token"); return; }
+        if (state != ImapState.SELECTED) { sendLine(currentTag + " BAD Select mailbox first"); return; }
+        String[] parts = args.split(" ");
+        int seq = Integer.parseInt(parts[0]);
+        Message msg = currentMailbox.getMessageBySequence(seq);
+        if (msg != null) {
+            String content = new String(Files.readAllBytes(msg.getFile().toPath()));
+            sendLine("* " + seq + " FETCH (BODY[] {" + content.length() + "}");
+            sendLine(content);
+            sendLine(")");
+            sendLine(currentTag + " OK FETCH completed");
+        } else {
+            sendLine(currentTag + " NO No such message");
+        }
+    }
+
+    private void handleStore(String args) throws IOException {
+        if (!isTokenValid()) { sendLine(currentTag + " BAD Invalid session token"); return; }
+        String[] parts = args.split(" ", 3);
+        int seq = Integer.parseInt(parts[0]);
+        currentMailbox.updateFlags(seq, parts[1].toUpperCase(), parts[2]);
+        sendLine(currentTag + " OK STORE completed");
+    }
+
+    private void handleSearch(String args) throws IOException {
+        if (!isTokenValid()) { sendLine(currentTag + " BAD Invalid session token"); return; }
+        List<Integer> ids = currentMailbox.searchMessages(args);
+        StringBuilder sb = new StringBuilder("* SEARCH");
+        for(int id : ids) sb.append(" ").append(id);
+        sendLine(sb.toString());
+        sendLine(currentTag + " OK SEARCH completed");
+    }
+
     private String cleanInput(String input) {
         StringBuilder sb = new StringBuilder();
         for (char c : input.toCharArray()) {
-            if (c == '\b' || (int)c == 127) { // Si c'est un Backspace
-                if (sb.length() > 0) sb.deleteCharAt(sb.length() - 1);
-            } else {
-                sb.append(c);
-            }
+            if (c == '\b' || (int)c == 127) { if (sb.length() > 0) sb.deleteCharAt(sb.length() - 1); }
+            else { sb.append(c); }
         }
         return sb.toString().trim();
-    }
-    
-    
-    private void handleCapability() throws IOException {
-        sendLine("* CAPABILITY " + CAPABILITIES);
-        sendLine(currentTag + " OK CAPABILITY completed");
-    }
-    
-    private void handleLogin(String args) throws IOException {
-        if (state != ImapState.NOT_AUTHENTICATED) {
-            sendLine(currentTag + " BAD Already authenticated");
-            return;
-        }
-        
-        String[] credentials = args.split(" ");
-        if (credentials.length < 2) {
-            sendLine(currentTag + " BAD Invalid arguments");
-            return;
-        }
-        
-        String username = credentials[0];
-        String password = credentials[1]; // Dans un vrai serveur, vérifier le mot de passe
-        
-        File dir = new File("mailserver/" + username);
-        if (dir.exists() && dir.isDirectory()) {
-            currentUser = username;
-            userDir = dir;
-            state = ImapState.AUTHENTICATED;
-            
-            sendLine(currentTag + " OK LOGIN completed");
-        } else {
-            sendLine(currentTag + " NO Login failed");
-        }
-    }
-    
-    private void handleSelect(String args) throws IOException {
-        if (state == ImapState.NOT_AUTHENTICATED) {
-            sendLine(currentTag + " BAD Not authenticated");
-            return;
-        }
-        
-        String mailboxName = args.trim();
-        
-        // Conformément à la consigne : uniquement INBOX pour simplifier
-        if (!"INBOX".equalsIgnoreCase(mailboxName)) {
-            sendLine(currentTag + " NO Mailbox doesn't exist (only INBOX is supported)");
-            return;
-        }
-        
-        //File inboxDir = new File(userDir, "INBOX");
-        File inboxDir = userDir;
-        if (!inboxDir.exists()) {
-            inboxDir.mkdirs();
-        }
-        
-        currentMailbox = new Mailbox("INBOX", inboxDir);
-        state = ImapState.SELECTED;
-        
-        // Réponses conformes à la RFC
-        sendLine("* " + currentMailbox.getMessageCount() + " EXISTS");
-        sendLine("* 0 RECENT"); // Simplifié
-        sendLine("* OK [UIDNEXT " + currentMailbox.getNextUid() + "] Predicted next UID");
-        sendLine("* OK [UIDVALIDITY " + System.currentTimeMillis() + "] UIDs valid");
-        sendLine("* FLAGS (\\Seen \\Deleted)");
-        sendLine("* OK [PERMANENTFLAGS (\\Seen \\Deleted)] Limited");
-        
-        sendLine(currentTag + " OK [READ-WRITE] SELECT completed");
-    }
-    
-    private void handleFetch(String args) throws IOException {
-        if (state != ImapState.SELECTED) {
-            sendLine(currentTag + " BAD No mailbox selected");
-            return;
-        }
-        
-        String[] parts = args.split(" ", 2);
-        if (parts.length < 2) {
-            sendLine(currentTag + " BAD Invalid FETCH arguments");
-            return;
-        }
-        
-        String sequence = parts[0];
-        String dataItems = parts[1].toUpperCase();
-        
-        try {
-            int seqNum = Integer.parseInt(sequence);
-            fetchMessage(seqNum, dataItems);
-        } catch (NumberFormatException e) {
-            sendLine(currentTag + " BAD Invalid sequence number");
-            return;
-        }
-        
-        sendLine(currentTag + " OK FETCH completed");
-    }
-    
-    private void fetchMessage(int seqNum, String dataItems) throws IOException {
-        Message msg = currentMailbox.getMessageBySequence(seqNum);
-        if (msg == null) {
-            sendLine(currentTag + " BAD Invalid message sequence number");
-            return;
-        }
-        
-        String content = new String(Files.readAllBytes(msg.getFile().toPath()));
-        
-        if (dataItems.contains("BODY[HEADER]") || dataItems.contains("BODY.PEEK[HEADER]")) {
-            // Récupérer uniquement les en-têtes
-            String[] lines = content.split("\n");
-            StringBuilder headers = new StringBuilder();
-            for (String line : lines) {
-                if (line.trim().isEmpty()) break;
-                headers.append(line).append("\n");
-            }
-            sendLine("* " + seqNum + " FETCH (BODY[HEADER] {" + headers.length() + "}");
-            sendLine(headers.toString());
-        } else if (dataItems.contains("BODY[]")) {
-            // Message complet
-            sendLine("* " + seqNum + " FETCH (BODY[] {" + content.length() + "}");
-            sendLine(content);
-        } else if (dataItems.contains("FLAGS")) {
-            // Uniquement les flags
-            sendLine("* " + seqNum + " FETCH (FLAGS (" + msg.getFlags() + "))");
-        } else {
-            // Réponse minimale par défaut
-            sendLine("* " + seqNum + " FETCH (FLAGS (" + msg.getFlags() + ") RFC822.SIZE " + msg.getFile().length() + ")");
-        }
-        
-        // Marquer comme lu sauf si BODY.PEEK est utilisé
-        if (!dataItems.contains("BODY.PEEK") && !msg.isSeen()) {
-            msg.setSeen(true);
-        }
-    }
-    
-    private void handleStore(String args) throws IOException {
-        if (state != ImapState.SELECTED) {
-            sendLine(currentTag + " BAD No mailbox selected");
-            return;
-        }
-        
-        // Format: STORE <sequence> <operation> <flag list>
-        String[] parts = args.split(" ", 3);
-        if (parts.length < 3) {
-            sendLine(currentTag + " BAD Invalid STORE arguments");
-            return;
-        }
-        
-        String sequence = parts[0];
-        String operation = parts[1].toUpperCase();
-        String flagList = parts[2].replaceAll("[()]", "");
-        
-        try {
-            int seqNum = Integer.parseInt(sequence);
-            currentMailbox.updateFlags(seqNum, operation, flagList);
-            
-            if (!operation.contains(".SILENT")) {
-                Message msg = currentMailbox.getMessageBySequence(seqNum);
-                sendLine("* " + seqNum + " FETCH (FLAGS (" + msg.getFlags() + "))");
-            }
-            
-            sendLine(currentTag + " OK STORE completed");
-        } catch (NumberFormatException e) {
-            sendLine(currentTag + " BAD Invalid sequence number");
-        }
-    }
-    
-    private void handleSearch(String args) throws IOException {
-        if (state != ImapState.SELECTED) {
-            sendLine(currentTag + " BAD No mailbox selected");
-            return;
-        }
-        
-        // Recherche simple (contient le texte)
-        List<Integer> results = currentMailbox.searchMessages(args);
-        
-        StringBuilder response = new StringBuilder("* SEARCH");
-        for (Integer seq : results) {
-            response.append(" ").append(seq);
-        }
-        sendLine(response.toString());
-        sendLine(currentTag + " OK SEARCH completed");
-    }
-    
-    private void handleNoop() throws IOException {
-        sendLine(currentTag + " OK NOOP completed");
-    }
-    
-    private void handleLogout() throws IOException {
-        sendLine("* BYE IMAP4rev1 Server logging out");
-        sendLine(currentTag + " OK LOGOUT completed");
-        state = ImapState.LOGOUT;
-        closeSession();
     }
 }

@@ -3,15 +3,15 @@ import java.io.*;
 import java.net.*;
 import java.util.*;
 
+import org.example.SharedFolder.IAuthService;
+
 public class Pop3Server {
     private static final int PORT = 1110; // Custom port to avoid conflicts
     private Pop3ServerGUI gui;
     private ServerSocket serverSocket;
     private volatile boolean keepRunning = true;
     private List<Pop3Session> activeSessions = new ArrayList<>();
-    //private List<File> emails;
-    //private List<Boolean> deletionFlags = new ArrayList<>();
-
+    
     public Pop3Server(Pop3ServerGUI gui) {
         this.gui = gui;
     }
@@ -81,10 +81,11 @@ class Pop3Session extends Thread {
     private String username;
     private File userDir;
     private List<File> emails;
-    private boolean authenticated;
+    private String sessionToken = null;
     private List<Boolean> deletionFlags; // Déclaration correcte
     private int clientNum;
     private Pop3Server server;
+    private IAuthService authService; // Ajout de l'interface d'authentification
 
 
    public Pop3Session(Socket socket, Pop3ServerGUI gui, Pop3Server server) {
@@ -92,7 +93,13 @@ class Pop3Session extends Thread {
         this.gui = gui; // Initialisation
         this.server = server; // Initialisation
         this.clientNum = gui.getNextClientNumber(); // Récupération du numéro de client
-        this.authenticated = false;
+        this.sessionToken = null;
+        //recuperation du service rmi
+        try {
+            authService = (IAuthService) java.rmi.Naming.lookup("rmi://localhost/AuthService");
+        } catch (Exception e) {
+            gui.appendLog("ERREUR RMI : Impossible de contacter AuthServer.");
+        }
     }
 
     public void closeSession() {
@@ -151,7 +158,7 @@ class Pop3Session extends Thread {
 
             }
             // Si la boucle se termine, cela signifie que la connexion a été interrompue sans QUIT.
-            if (authenticated) {
+            if (isTokenValid()) {
                 sendResponse("-ERR Connection closed without QUIT");
                 System.err.println("La connexion a été interrompue sans recevoir QUIT. Les suppressions marquées ne seront pas appliquées.");
             }
@@ -184,58 +191,69 @@ class Pop3Session extends Thread {
     }
 
     private void handleUser(String arg) {
-        File dir = new File("mailserver/" + arg);
-        if (dir.exists() && dir.isDirectory()) {
-            username = arg;
-            userDir = dir;
-            sendResponse("+Ok User accepted");
-            
-        } else {
-            sendResponse("-ERR User not found");
-            
-        }
-    }
-
-    private void handlePass(String arg) {
-        if (username == null) {
-            sendResponse("-ERR USER required first");
-            out.println("-ERR USER required first");
+        if (arg == null || arg.isEmpty()) {
+            sendResponse("-ERR Missing username");
             return;
         }
-        // Pour simplifier, on suppose que "userDir" est le dossier de l'utilisateur déjà défini
-        authenticated = true;
-        // Chargez les fichiers du répertoire dans une ArrayList mutable
-        File[] files = userDir.listFiles();
-        if (files == null) {
-            emails = new ArrayList<>();
-        } else {
-            emails = new ArrayList<>(Arrays.asList(files));
-        }
-        // Initialisez les flags de suppression : aucun email n'est marqué (false)
-        deletionFlags = new ArrayList<>();
-        for (int i = 0; i < emails.size(); i++) {
-            deletionFlags.add(false);
-        }
-        sendResponse("+OK Password accepted");
-        out.println("+OK Password accepted");
+        this.username = arg; // On stocke juste le nom pour le moment
+        sendResponse("+OK User accepted, send password");
     }
 
+   private void handlePass(String arg) {
+        if (username == null) {
+            sendResponse("-ERR USER required first");
+            return;
+        }
+        try {
+            if (authService != null) {
+                // Utilisation de la nouvelle méthode de ton interface
+                String token = authService.loginAndGetToken(username, arg);
 
+                if (token != null) {
+                    this.sessionToken = token; // On stocke le jeton
+
+                    userDir = new File("mailserver/" + username);
+                    if (!userDir.exists()) userDir.mkdirs();
+
+                    File[] files = userDir.listFiles();
+                    emails = (files == null) ? new ArrayList<>() : new ArrayList<>(Arrays.asList(files));
+                    deletionFlags = new ArrayList<>(Collections.nCopies(emails.size(), false));
+
+                    sendResponse("+OK Welcome " + username + ". Session Token: " + token);
+                } else {
+                    sendResponse("-ERR Invalid username or password");
+                }
+            }
+        } catch (Exception e) {
+            sendResponse("-ERR Authentication service unavailable");
+            gui.appendLog("Erreur RMI (loginAndGetToken) : " + e.getMessage());
+        }
+    }
+
+    private boolean isTokenValid() {
+        try {
+            if (sessionToken == null || authService == null) return false;
+            // verifyToken renvoie le nom d'utilisateur si le token est bon
+            String verifiedUser = authService.verifyToken(sessionToken);
+            return verifiedUser != null && verifiedUser.equals(username);
+        } catch (Exception e) {
+            gui.appendLog("Erreur lors de la vérification du token : " + e.getMessage());
+            return false;
+        }
+    }
 
     private void handleStat() {
-        if (!authenticated) {
-            sendResponse("-ERR Authentication required");
+        if (!isTokenValid()) {
+            sendResponse("-ERR Session expired or unauthorized");
             return;
         }
         long size = emails.stream().mapToLong(File::length).sum();
         sendResponse("+OK " + emails.size() + " " + size);
-        
     }
 
     private void handleList() {
-        if (!authenticated) {
-            sendResponse("-ERR Authentication required");
-            
+        if (!isTokenValid()) {
+            sendResponse("-ERR Session expired or unauthorized");
             return;
         }
         sendResponse("+OK " + emails.size() + " messages");
@@ -246,9 +264,8 @@ class Pop3Session extends Thread {
     }
 
     private void handleRetr(String arg) {
-        if (!authenticated) {
-            sendResponse("-ERR Authentication required");
-            
+        if (!isTokenValid()) {
+            sendResponse("-ERR Session expired or unauthorized");
             return;
         }
         try {
@@ -275,9 +292,9 @@ class Pop3Session extends Thread {
     }
 
     private void handleDele(String arg) {
-        if (!authenticated) {
+        if (!isTokenValid()) {
             
-            sendResponse("-ERR Authentication required!");
+            sendResponse("-ERR Session expired or unauthorized");
             return;
         }
         try {
@@ -307,9 +324,8 @@ class Pop3Session extends Thread {
         }
     }
     private void handleRset() {
-        if (!authenticated) {
-            sendResponse("-ERR Authentication required");
-            
+        if (!isTokenValid()) {
+            sendResponse("-ERR Session expired or unauthorized");
             return;
         }
         // Remise à zéro de tous les flags de suppression
@@ -339,6 +355,7 @@ class Pop3Session extends Thread {
                 }
             }
         }
+        sessionToken = null; // Invalider le token à la fin de la session
         sendResponse("+OK POP3 server signing off");
         gui.appendLog("POP3 server signing off");
     }
