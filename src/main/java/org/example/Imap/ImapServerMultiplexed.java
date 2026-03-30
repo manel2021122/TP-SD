@@ -1,4 +1,4 @@
-package org.example;
+package org.example.Imap;
 
 import java.io.*;
 import java.nio.*;

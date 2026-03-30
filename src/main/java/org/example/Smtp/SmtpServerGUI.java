@@ -1,4 +1,4 @@
-package org.example;
+package org.example.Smtp;
 
 import javax.swing.*;
 import java.awt.*;

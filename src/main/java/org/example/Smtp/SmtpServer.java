@@ -1,4 +1,4 @@
-package org.example;
+package org.example.Smtp;
 import java.io.*;
 import java.net.*;
 import java.text.SimpleDateFormat;

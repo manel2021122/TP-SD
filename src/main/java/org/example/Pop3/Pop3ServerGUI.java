@@ -1,4 +1,4 @@
-package org.example;
+package org.example.Pop3;
 
 import javax.swing.*;
 import java.awt.*;
@@ -62,7 +62,10 @@ public class Pop3ServerGUI extends JFrame {
 
     public void updateClientCount(boolean increment) {
         int count = increment ? connectedClients.incrementAndGet() : connectedClients.decrementAndGet();
-        SwingUtilities.invokeLater(() -> clientCountLabel.setText("Clients connectés : " + count));
+        if (count < 0) count = connectedClients.getAndSet(0); 
+    
+        final int finalCount = count;
+        SwingUtilities.invokeLater(() -> clientCountLabel.setText("Clients connectés : " + finalCount));
     }
 
     public int getNextClientNumber() {

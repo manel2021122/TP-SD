@@ -1,4 +1,4 @@
-package org.example;
+package org.example.Pop3;
 import java.io.*;
 import java.net.*;
 import java.util.*;
